@@ -1,4 +1,4 @@
-name: Hourly rclone copy
+name: Hourly copy
 
 on:
   schedule:

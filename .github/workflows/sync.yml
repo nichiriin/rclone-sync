@@ -70,7 +70,7 @@ jobs:
           done
           echo 'Teldrive did not listen on localhost:8080'; exit 1
 
-      - name: Copy assets and library
+      - name: Copy library then assets
         timeout-minutes: 115
         env:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
@@ -78,35 +78,32 @@ jobs:
         run: |
           set -euo pipefail
           common=(--check-first --teldrive-api-host http://localhost:8080
-            --max-duration 110m --cutoff-mode HARD --retries 1
+            --cutoff-mode HARD --retries 1
             --stats 1m --stats-one-line --log-level ERROR)
           if test "$DRY_RUN" = true; then common+=(--dry-run); fi
-          # Run both folder copies within the same time budget and concurrency group.
-          timeout --signal=TERM --kill-after=30s 112m \
-            rclone copy tdrive:assets gpix:assets --transfers 25 "${common[@]}" \
-            > "$RUNNER_TEMP/rclone-sync/assets.log" 2>&1 &
-          assets_pid=$!
-          timeout --signal=TERM --kill-after=30s 112m \
-            rclone copy tdrive:library gpix:library --transfers 4 "${common[@]}" \
-            > "$RUNNER_TEMP/rclone-sync/library.log" 2>&1 &
-          library_pid=$!
-          trap 'kill "$assets_pid" "$library_pid" 2>/dev/null || true' EXIT
-          assets_status=0
-          library_status=0
-          wait "$assets_pid" || assets_status=$?
-          wait "$library_pid" || library_status=$?
-          trap - EXIT
-          printf 'assets exit status: %s\nlibrary exit status: %s\n' \
-            "$assets_status" "$library_status" >> "$GITHUB_STEP_SUMMARY"
-          failed=0
-          for status in "$assets_status" "$library_status"; do
+          deadline=$((SECONDS + 110 * 60))
+          copy_folder() {
+            local folder="$1" transfers="$2" remaining status=0
+            remaining=$((deadline - SECONDS))
+            if ((remaining <= 0)); then
+              echo "$folder skipped: shared copy duration reached." >> "$GITHUB_STEP_SUMMARY"
+              return 0
+            fi
+            echo "Copying $folder with $transfers transfers."
+            timeout --signal=TERM --kill-after=30s "$((remaining + 30))s" \
+              rclone copy "tdrive:$folder" "gpix:$folder" --transfers "$transfers" \
+              --max-duration "${remaining}s" "${common[@]}" \
+              > "$RUNNER_TEMP/rclone-sync/$folder.log" 2>&1 || status=$?
+            echo "$folder exit status: $status" >> "$GITHUB_STEP_SUMMARY"
             case "$status" in
-              0) echo 'Folder copy completed.' ;;
-              10) echo 'Duration reached; remaining files will be checked next run.' ;;
-              *) echo "Folder copy failed (exit $status)."; failed=1 ;;
+              0) echo "$folder copy completed." ;;
+              10) echo "$folder duration reached; remaining files will be checked next run." ;;
+              *) echo "$folder copy failed (exit $status)."; return "$status" ;;
             esac
-          done
-          exit "$failed"
+          }
+          # Sequential copies: library must finish before assets starts.
+          copy_folder library 4
+          copy_folder assets 25
 
       - name: Clean up
         if: always()

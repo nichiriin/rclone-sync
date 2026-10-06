@@ -124,7 +124,7 @@ jobs:
             esac
           }
           # Sequential copies: library must finish before assets starts.
-          copy_folder library 4
+          copy_folder library 7
           copy_folder assets 25
 
       - name: Clean up

@@ -9,6 +9,10 @@ on:
         description: Preview copies without modifying the destination
         type: boolean
         default: true
+      detailed_logs:
+        description: Show detailed rclone output in public Actions logs
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -74,12 +78,18 @@ jobs:
         timeout-minutes: 115
         env:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          DETAILED_LOGS: ${{ github.event_name == 'workflow_dispatch' && inputs.detailed_logs }}
         shell: bash
         run: |
           set -euo pipefail
           common=(--check-first --teldrive-api-host http://localhost:8080
             --cutoff-mode HARD --retries 1
-            --stats 1m --stats-one-line --log-level ERROR)
+            --stats 1m --stats-one-line)
+          if test "$DETAILED_LOGS" = true; then
+            common+=(--log-level DEBUG)
+          else
+            common+=(--log-level ERROR)
+          fi
           if test "$DRY_RUN" = true; then common+=(--dry-run); fi
           deadline=$((SECONDS + 110 * 60))
           copy_folder() {
@@ -90,10 +100,20 @@ jobs:
               return 0
             fi
             echo "Copying $folder with $transfers transfers."
-            timeout --signal=TERM --kill-after=30s "$((remaining + 30))s" \
-              rclone copy "tdrive:$folder" "gpix:$folder" --transfers "$transfers" \
-              --max-duration "${remaining}s" "${common[@]}" \
-              > "$RUNNER_TEMP/rclone-sync/$folder.log" 2>&1 || status=$?
+            if test "$DETAILED_LOGS" = true; then
+              set +e
+              timeout --signal=TERM --kill-after=30s "$((remaining + 30))s" \
+                rclone copy "tdrive:$folder" "gpix:$folder" --transfers "$transfers" \
+                --max-duration "${remaining}s" "${common[@]}" 2>&1 \
+                | tee "$RUNNER_TEMP/rclone-sync/$folder.log"
+              status=${PIPESTATUS[0]}
+              set -e
+            else
+              timeout --signal=TERM --kill-after=30s "$((remaining + 30))s" \
+                rclone copy "tdrive:$folder" "gpix:$folder" --transfers "$transfers" \
+                --max-duration "${remaining}s" "${common[@]}" \
+                > "$RUNNER_TEMP/rclone-sync/$folder.log" 2>&1 || status=$?
+            fi
             echo "$folder exit status: $status" >> "$GITHUB_STEP_SUMMARY"
             case "$status" in
               0) echo "$folder copy completed." ;;

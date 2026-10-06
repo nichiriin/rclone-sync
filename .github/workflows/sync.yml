@@ -19,7 +19,6 @@ concurrency:
 
 jobs:
   copy:
-    if: github.repository == 'nichiriin/rclone-sync' && (github.event_name == 'workflow_dispatch' || vars.SYNC_ENABLED == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:

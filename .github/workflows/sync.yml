@@ -40,16 +40,18 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rclone-sync"
           printf '%s\n' "$TELDRIVE_ENV" > "$RUNNER_TEMP/rclone-sync/teldrive.env"
 
-      - name: Install pinned forked rclone
+      - name: Install forked rclone
+        env:
+          RCLONE_DOWNLOAD_URL: ${{ secrets.RCLONE_DOWNLOAD_URL }}
         shell: bash
         run: |
           set -euo pipefail
+          test -n "$RCLONE_DOWNLOAD_URL" || { echo 'Missing RCLONE_DOWNLOAD_URL secret'; exit 1; }
           install_dir="$RUNNER_TEMP/rclone-bin"
           mkdir -p "$install_dir"
           curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
-            'https://github.com/divyam234/nix-pkgs/releases/download/rclone-v1.75.2/rclone-v1.75.2-linux-amd64.tar.gz' \
+            "$RCLONE_DOWNLOAD_URL" \
             --output "$install_dir/rclone.tar.gz"
-          printf '%s  %s\n' '7aafa0a0298be89c03c1491d0e53bde4c72fa4c67df2d9b2855ecb8684bdc7e7' "$install_dir/rclone.tar.gz" | sha256sum --check --status
           tar --no-same-owner -xzf "$install_dir/rclone.tar.gz" -C "$install_dir" \
             --strip-components=1 rclone-v1.75.2-linux-amd64/rclone
           chmod 755 "$install_dir/rclone"

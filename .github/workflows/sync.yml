@@ -1,0 +1,117 @@
+name: Hourly rclone sync
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview changes without modifying the destination
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rclone-remote-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'nichiriin/rclone-sync' && (github.event_name == 'workflow_dispatch' || vars.SYNC_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SOURCE: ${{ vars.SOURCE_REMOTE }}
+      DESTINATION: ${{ vars.DESTINATION_REMOTE }}
+      RCLONE_CONFIG: ${{ runner.temp }}/rclone-sync/rclone.conf
+    steps:
+      - name: Validate configuration
+        env:
+          CONFIG_CONTENT: ${{ secrets.RCLONE_CONFIG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SOURCE" || { echo 'Set SOURCE_REMOTE repository variable'; exit 1; }
+          test -n "$DESTINATION" || { echo 'Set DESTINATION_REMOTE repository variable'; exit 1; }
+          test "$SOURCE" != "$DESTINATION" || { echo 'Source and destination must differ'; exit 1; }
+          test -n "$CONFIG_CONTENT" || { echo 'Add RCLONE_CONFIG repository secret'; exit 1; }
+          umask 077
+          mkdir -p "$(dirname "$RCLONE_CONFIG")"
+          printf '%s\n' "$CONFIG_CONTENT" > "$RCLONE_CONFIG"
+
+      - name: Install pinned forked rclone
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_dir="$RUNNER_TEMP/rclone-bin"
+          mkdir -p "$install_dir"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
+            'https://github.com/divyam234/nix-pkgs/releases/download/rclone-v1.75.2/rclone-v1.75.2-linux-amd64.tar.gz' \
+            --output "$install_dir/rclone.tar.gz"
+          printf '%s  %s\n' '7aafa0a0298be89c03c1491d0e53bde4c72fa4c67df2d9b2855ecb8684bdc7e7' "$install_dir/rclone.tar.gz" | sha256sum --check --status
+          tar -xzf "$install_dir/rclone.tar.gz" -C "$install_dir" \
+            --strip-components=1 rclone-v1.75.2-linux-amd64/rclone
+          chmod 755 "$install_dir/rclone"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "$install_dir/rclone" version
+
+      - name: Start optional Teldrive v2
+        if: vars.START_TELDRIVE == 'true'
+        env:
+          TELDRIVE_ENV: ${{ secrets.TELDRIVE_ENV }}
+          HEALTH_URL: ${{ vars.TELDRIVE_HEALTH_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TELDRIVE_ENV" || { echo 'Add TELDRIVE_ENV secret with Teldrive environment settings'; exit 1; }
+          test -n "$HEALTH_URL" || { echo 'Set TELDRIVE_HEALTH_URL to a working HTTP readiness endpoint'; exit 1; }
+          umask 077
+          printf '%s\n' "$TELDRIVE_ENV" > "$RUNNER_TEMP/rclone-sync/teldrive.env"
+          docker pull ghcr.io/tgdrive/teldrive:v2
+          docker run --detach --name teldrive-sync --network host \
+            --env-file "$RUNNER_TEMP/rclone-sync/teldrive.env" \
+            ghcr.io/tgdrive/teldrive:v2 > /dev/null
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --max-time 3 "$HEALTH_URL" > /dev/null 2>&1; then exit 0; fi
+            if test "$(docker inspect --format '{{.State.Running}}' teldrive-sync)" != true; then
+              echo 'Teldrive exited; verify its configuration and persistent database'; exit 1
+            fi
+            sleep 2
+          done
+          echo 'Teldrive did not become ready'; exit 1
+
+      - name: Sync remotes
+        timeout-minutes: 115
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(sync "$SOURCE" "$DESTINATION" --config "$RCLONE_CONFIG"
+            --max-duration 110m --cutoff-mode HARD --retries 1
+            --stats 1m --stats-one-line --log-level ERROR)
+          if test "$DRY_RUN" = true; then args+=(--dry-run); fi
+          # Keep file paths and backend responses out of public Actions logs.
+          set +e
+          timeout --signal=TERM --kill-after=30s 112m rclone "${args[@]}" > "$RUNNER_TEMP/rclone-sync/run.log" 2>&1
+          status=$?
+          set -e
+          echo "rclone exit status: $status" >> "$GITHUB_STEP_SUMMARY"
+          if test "$status" = 0; then
+            echo 'Sync completed successfully.'
+          elif test "$status" = 10; then
+            echo 'Transfer duration reached; the next run will recheck remaining files.'
+          else
+            echo "Sync failed (exit $status); detailed logs are withheld from this public repository."
+            exit "$status"
+          fi
+
+      - name: Clean up
+        if: always()
+        shell: bash
+        run: |
+          docker rm --force teldrive-sync > /dev/null 2>&1 || true
+          rm -rf "$RUNNER_TEMP/rclone-sync" "$RUNNER_TEMP/rclone-bin"

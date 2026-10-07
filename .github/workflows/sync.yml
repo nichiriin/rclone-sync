@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          common=(--check-first --teldrive-api-host http://localhost:8080
+          common=(--check-first --order-by modtime,desc --teldrive-api-host http://localhost:8080
             --cutoff-mode HARD --retries 1
             --stats 1m --stats-one-line)
           if test "$DETAILED_LOGS" = true; then
